@@ -96,23 +96,27 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, params map[stri
 				w.Write(t.Data)
 			}
 		case xml.TextToken:
-			t.Data = parse.ReplaceMultipleWhitespaceAndEntities(t.Data, minifyXML.EntitiesMap, nil)
-			t.Data = parse.TrimWhitespace(t.Data)
-
 			if tag == Style && len(t.Data) > 0 {
-				if err := m.MinifyMimetype(defaultStyleType, w, buffer.NewReader(t.Data), defaultStyleParams); err != nil {
+				// Higher-cap subslice so nested CSS NewInput can alias the parent
+				// working buffer (same pattern as html.inputSlice for <style>).
+				if err := m.MinifyMimetype(defaultStyleType, w, buffer.NewReader(inputSlice(z, t.Offset, t.Data)), defaultStyleParams); err != nil {
 					if err != minify.ErrNotExist {
 						return minify.UpdateErrorPosition(err, z, t.Offset)
 					}
+					t.Data = parse.ReplaceMultipleWhitespaceAndEntities(t.Data, minifyXML.EntitiesMap, nil)
+					t.Data = parse.TrimWhitespace(t.Data)
 					w.Write(t.Data)
 				}
 			} else {
+				t.Data = parse.ReplaceMultipleWhitespaceAndEntities(t.Data, minifyXML.EntitiesMap, nil)
+				t.Data = parse.TrimWhitespace(t.Data)
 				w.Write(t.Data)
 			}
 		case xml.CDATAToken:
 			if tag == Style {
 				minifyBuffer.Reset()
-				if err := m.MinifyMimetype(defaultStyleType, minifyBuffer, buffer.NewReader(t.Text), defaultStyleParams); err == nil {
+				// t.Text is the content after the 9-byte "<![CDATA[" prefix.
+				if err := m.MinifyMimetype(defaultStyleType, minifyBuffer, buffer.NewReader(inputSlice(z, t.Offset+9, t.Text)), defaultStyleParams); err == nil {
 					t.Data = append(t.Data[:9], minifyBuffer.Bytes()...)
 					t.Text = t.Data[9:]
 					t.Data = append(t.Data, cdataEndBytes...)
@@ -360,4 +364,31 @@ func skipTag(tb *TokenBuffer) {
 			level++
 		}
 	}
+}
+
+// inputSlice returns data re-sliced against the parent parse.Input so cap
+// extends toward the end of the document. parse.Input.Shift zero-caps tokens
+// (buf[i:j:j]); nested parse.NewInputBytes then always reallocates when
+// cap==len. A higher-cap view avoids that copy when content follows the token
+// (nested minifiers still call Restore for the temporary NULL terminator).
+//
+// If offset does not identify the same backing storage as data, data is
+// returned unchanged so a bad offset cannot feed the nested minifier the
+// wrong bytes.
+//
+// This duplicates html.inputSlice, keep them in sync. Maybe this should live on
+// parse.Input instead.
+func inputSlice(z *parse.Input, offset int, data []byte) []byte {
+	if len(data) == 0 {
+		return data
+	}
+	full := z.Bytes()
+	if offset < 0 || offset+len(data) > len(full) {
+		return data
+	}
+	// Same addressable range as data, but cap = len(full)-offset.
+	if &full[offset] != &data[0] {
+		return data
+	}
+	return full[offset : offset+len(data)]
 }

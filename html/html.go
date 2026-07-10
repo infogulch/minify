@@ -131,7 +131,7 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 				}
 			}
 		case html.SVGToken:
-			if err := m.MinifyMimetype(svgMimeBytes, w, buffer.NewReader(t.Data), inlineParams); err != nil {
+			if err := m.MinifyMimetype(svgMimeBytes, w, buffer.NewReader(inputSlice(z, t.Offset, t.Data)), inlineParams); err != nil {
 				if err != minify.ErrNotExist {
 					return minify.UpdateErrorPosition(err, z, t.Offset)
 				}
@@ -139,7 +139,7 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 			}
 			omitSpace = false
 		case html.MathToken:
-			if err := m.MinifyMimetype(mathMimeBytes, w, buffer.NewReader(t.Data), nil); err != nil {
+			if err := m.MinifyMimetype(mathMimeBytes, w, buffer.NewReader(inputSlice(z, t.Offset, t.Data)), nil); err != nil {
 				if err != minify.ErrNotExist {
 					return minify.UpdateErrorPosition(err, z, t.Offset)
 				}
@@ -147,7 +147,7 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 			}
 			omitSpace = false
 		case html.XMLToken:
-			if err := m.MinifyMimetype(xmlMimeBytes, w, buffer.NewReader(t.Data), nil); err != nil {
+			if err := m.MinifyMimetype(xmlMimeBytes, w, buffer.NewReader(inputSlice(z, t.Offset, t.Data)), nil); err != nil {
 				if err != minify.ErrNotExist {
 					return minify.UpdateErrorPosition(err, z, t.Offset)
 				}
@@ -171,7 +171,7 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 					} else if rawTagHash == Style {
 						mimetype = cssMimeBytes
 					}
-					if err := m.MinifyMimetype(mimetype, w, buffer.NewReader(t.Data), params); err != nil {
+					if err := m.MinifyMimetype(mimetype, w, buffer.NewReader(inputSlice(z, t.Offset, t.Data)), params); err != nil {
 						if err != minify.ErrNotExist {
 							return minify.UpdateErrorPosition(err, z, t.Offset)
 						}
@@ -543,4 +543,31 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 			}
 		}
 	}
+}
+
+// inputSlice returns data re-sliced against the parent parse.Input so cap
+// extends toward the end of the document. parse.Input.Shift zero-caps tokens
+// (buf[i:j:j]); nested parse.NewInputBytes then always reallocates when
+// cap==len. A higher-cap view avoids that copy when content follows the token
+// (nested minifiers still call Restore for the temporary NULL terminator).
+//
+// If offset does not identify the same backing storage as data, data is
+// returned unchanged so a bad offset cannot feed the nested minifier the
+// wrong bytes.
+//
+// This duplicates svg.inputSlice, keep them in sync. Maybe this should live on
+// parse.Input instead.
+func inputSlice(z *parse.Input, offset int, data []byte) []byte {
+	if len(data) == 0 {
+		return data
+	}
+	full := z.Bytes()
+	if offset < 0 || offset+len(data) > len(full) {
+		return data
+	}
+	// Same addressable range as data, but cap = len(full)-offset.
+	if &full[offset] != &data[0] {
+		return data
+	}
+	return full[offset : offset+len(data)]
 }
