@@ -2,6 +2,7 @@ package minify_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -192,6 +193,158 @@ func TestMinifyMappedJSMatchesBytes(t *testing.T) {
 	out2, err := m.Bytes("application/javascript", append([]byte(nil), src...))
 	test.Error(t, err)
 	test.Bytes(t, buf.Bytes(), out2)
+}
+
+func TestSourceMapJSRealMinify(t *testing.T) {
+	m := commonM()
+	src := []byte("" +
+		"function greet(name) {\n" +
+		"  return 'hi ' + name + name;\n" +
+		"}\n" +
+		"greet('world');\n")
+	out, ix, err := m.BytesMapped("application/javascript", src)
+	test.Error(t, err)
+
+	raw := ix.SourceMap(src, out, minify.SourceMapOptions{
+		File:           "greet.min.js",
+		Source:         "greet.js",
+		IncludeContent: true,
+	})
+	if !json.Valid(raw) {
+		t.Fatalf("invalid source map JSON: %s", raw)
+	}
+	var doc struct {
+		Version  int      `json:"version"`
+		Sources  []string `json:"sources"`
+		Names    []string `json:"names"`
+		Mappings string   `json:"mappings"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Version != 3 || doc.Mappings == "" || len(doc.Sources) != 1 {
+		t.Fatalf("bad envelope: %+v", doc)
+	}
+	if len(doc.Names) != 0 {
+		t.Fatalf("names should be empty until Phase 4: %v", doc.Names)
+	}
+
+	a := ix.AuditSegments(src, out)
+	if a.GenIssues > 0 || a.ExactOverlaps > 0 {
+		t.Fatalf("audit:\n%s", a.Report)
+	}
+	t.Logf("out=%q coverage=%.4f", out, ix.Coverage())
+}
+
+// TestDumpSourceMapVisualizerReal writes real-minifier fixtures for
+// https://evanw.github.io/source-map-visualization/
+//
+//	DUMP_SOURCEMAP=/tmp/sm go test -run TestDumpSourceMapVisualizerReal -v
+func TestDumpSourceMapVisualizerReal(t *testing.T) {
+	dir := os.Getenv("DUMP_SOURCEMAP")
+	if dir == "" {
+		t.Skip("set DUMP_SOURCEMAP to a directory (or 1 for TempDir)")
+	}
+	if dir == "1" {
+		dir = t.TempDir()
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m := commonM()
+	// Keep var names so multi-emit "name" is visible in the visualizer.
+	m.AddFunc("application/javascript", (&js.Minifier{KeepVarNames: true}).Minify)
+
+	cases := []struct {
+		name, mediatype string
+		src             []byte
+	}{
+		{
+			name:      "greet",
+			mediatype: "application/javascript",
+			src: []byte("" +
+				"// demo for source-map-visualization\n" +
+				"function greet(name) {\n" +
+				"  return 'hi ' + name + name;\n" +
+				"}\n" +
+				"greet('world');\n"),
+		},
+		{
+			name:      "page",
+			mediatype: "text/html",
+			src: []byte("" +
+				"<!doctype html>\n" +
+				"<html>\n" +
+				"<head>\n" +
+				"  <style>\n" +
+				"    .box { color: #ff0000; margin: 0px; }\n" +
+				"  </style>\n" +
+				"</head>\n" +
+				"<body>\n" +
+				"  <h1 class=\"box\">Hello</h1>\n" +
+				"  <script>\n" +
+				"    function greet(name) {\n" +
+				"      return 'hi ' + name;\n" +
+				"    }\n" +
+				"    greet('world');\n" +
+				"  </script>\n" +
+				"</body>\n" +
+				"</html>\n"),
+		},
+	}
+
+	for _, tc := range cases {
+		out, ix, err := m.BytesMapped(tc.mediatype, tc.src)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		ext := filepath.Ext(tc.name)
+		if ext == "" {
+			switch tc.mediatype {
+			case "application/javascript":
+				ext = ".js"
+			case "text/html":
+				ext = ".html"
+			default:
+				ext = ".txt"
+			}
+		}
+		base := tc.name
+		srcName := base + ext
+		minName := base + ".min" + ext
+		mapName := minName + ".map"
+
+		mapJSON := ix.SourceMap(tc.src, out, minify.SourceMapOptions{
+			File:           minName,
+			Source:         srcName,
+			IncludeContent: true,
+		})
+		// Write minified bytes only (no sourceMappingURL trailer) so line/column
+		// counts match the map in visualizers that paste the three artifacts.
+
+		for _, f := range []struct {
+			name string
+			data []byte
+		}{
+			{srcName, tc.src},
+			{minName, out},
+			{mapName, mapJSON},
+		} {
+			p := filepath.Join(dir, f.name)
+			if err := os.WriteFile(p, f.data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("wrote %s (%d bytes)", p, len(f.data))
+		}
+		a := ix.AuditSegments(tc.src, out)
+		t.Logf("%s coverage=%.4f overlaps=%d genIssues=%d out=%q",
+			tc.name, ix.Coverage(), a.ExactOverlaps, a.GenIssues, out)
+		if a.GenIssues > 0 || a.ExactOverlaps > 0 {
+			t.Errorf("%s audit:\n%s", tc.name, a.Report)
+		}
+	}
+	t.Logf("Open https://evanw.github.io/source-map-visualization/ and load from %s", dir)
 }
 
 // --- benchmarks corpus ---
